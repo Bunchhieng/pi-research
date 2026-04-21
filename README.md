@@ -5,21 +5,12 @@ Worktree launcher and cleanup tools for [pi-autoresearch](https://github.com/dav
 ## Install
 
 ```bash
-# 1. Install the core autoresearch extension
-pi install https://github.com/davebcn87/pi-autoresearch
-
-# 2. Install this package (worktree launcher + cleanup skill)
-pi install https://github.com/Bunchhieng/pi-research
-
-# 3. Clone this repo locally
 git clone https://github.com/Bunchhieng/pi-research.git ~/pi-research
-
-# 4. Run the install script to add pi-research to your shell
 cd ~/pi-research && ./install.sh
-
-# 5. Reload your shell
 source ~/.zshrc
 ```
+
+The install script handles everything: installs `pi-autoresearch`, installs this pi package, and adds the `pi-research` alias to your shell. Safe to re-run.
 
 ## Usage
 
