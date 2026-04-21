@@ -11,10 +11,13 @@ pi install https://github.com/davebcn87/pi-autoresearch
 # 2. Install this package (worktree launcher + cleanup skill)
 pi install https://github.com/Bunchhieng/pi-research
 
-# 3. Add pi-research to your shell (run once)
-bash ~/.pi/agent/git/github.com/Bunchhieng/pi-research/install.sh
+# 3. Clone this repo locally
+git clone https://github.com/Bunchhieng/pi-research.git ~/pi-research
 
-# 4. Reload your shell
+# 4. Run the install script to add pi-research to your shell
+cd ~/pi-research && ./install.sh
+
+# 5. Reload your shell
 source ~/.zshrc
 ```
 
