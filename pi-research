@@ -1,0 +1,499 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# pi-research — launch pi in a fresh git worktree, or clean up old ones
+#
+# Usage:
+#   pi-research [goal]              Single worktree, launches pi
+#   pi-research -s N [goal]         N worktrees in tmux splits
+#   pi-research cleanup             Interactive cleanup of merged worktrees
+#   pi-research cleanup --all       Remove all merged worktrees without prompt
+#   pi-research cleanup <slug>      Remove a specific worktree by name match
+
+# ---------------------------------------------------------------------------
+# Colors
+# ---------------------------------------------------------------------------
+
+ORANGE='\033[38;5;214m'
+AMBER='\033[38;5;208m'
+BROWN='\033[38;5;172m'
+CREAM='\033[38;5;230m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+info()  { echo -e "${GREEN}$1${NC}"; }
+warn()  { echo -e "${YELLOW}⚠ $1${NC}"; }
+fail()  { echo -e "${RED}ERROR: $1${NC}" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Banner
+# ---------------------------------------------------------------------------
+
+print_banner() {
+  echo ""
+  echo -e "${ORANGE}${BOLD}"
+  echo '  ███████╗███╗   ██╗     ██╗ ██████╗ ██╗   ██╗'
+  echo '  ██╔════╝████╗  ██║     ██║██╔═══██╗╚██╗ ██╔╝'
+  echo '  █████╗  ██╔██╗ ██║     ██║██║   ██║ ╚████╔╝ '
+  echo '  ██╔══╝  ██║╚██╗██║██   ██║██║   ██║  ╚██╔╝  '
+  echo '  ███████╗██║ ╚████║╚█████╔╝╚██████╔╝   ██║   '
+  echo '  ╚══════╝╚═╝  ╚═══╝ ╚════╝  ╚═════╝    ╚═╝   '
+  echo -e "${NC}"
+  echo -e "            ${CREAM}e x p e r i m e n t i n g${NC}"
+  echo ""
+  echo -e "                      ${BROWN}(\\  /"
+  echo -e "                      (•ω• )  ♡"
+  echo -e "                     ／|  づ"
+  echo -e "                    (  (  /"
+  echo -e "                     \\_)\\_)${NC}"
+  echo ""
+  echo -e "  ${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  built by Bun${NC}"
+  echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Animated bun progress bar
+# ---------------------------------------------------------------------------
+
+repeat_char() {
+  local char="$1" count="$2" result="" i
+  for ((i=0; i<count; i++)); do result+="$char"; done
+  printf '%s' "$result"
+}
+
+# bun_progress <label> <pid>
+bun_progress() {
+  local label="$1"
+  local pid="$2"
+  local width=32
+  local i=0
+  local frames=('(\(\  ' '(•ω•) ' '(/(\  ' '(•ω•) ')
+
+  while kill -0 "$pid" 2>/dev/null; do
+    local filled=$(( i % (width + 1) ))
+    local empty=$(( width - filled ))
+    local bar
+    bar="$(repeat_char '█' "$filled")$(repeat_char '░' "$empty")"
+    local frame="${frames[$((i % 4))]}"
+    printf '\r  %-22s \033[38;5;214m[\033[0m%s\033[38;5;214m]\033[0m \033[38;5;172m%s\033[0m' \
+      "$label" "$bar" "$frame"
+    ((i++)) || true
+    sleep 0.04
+  done
+
+  local bar
+  bar="$(repeat_char '█' "$width")"
+  printf '\r  %-22s \033[38;5;214m[\033[0m%s\033[38;5;214m]\033[0m \033[32m✓\033[0m\n' \
+    "$label" "$bar"
+}
+
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+
+usage() {
+  echo "Usage: pi-research [command] [options]"
+  echo ""
+  echo "  <goal>              Create a worktree and launch pi"
+  echo "  -s N <goal>         Create N worktrees in tmux splits"
+  echo "  cleanup             Interactive cleanup of autoresearch worktrees"
+  echo "  cleanup --all       Remove all merged worktrees without prompt"
+  echo "  cleanup <slug>      Remove a specific worktree by name match"
+  echo ""
+  echo "Examples:"
+  echo "  pi-research"
+  echo "  pi-research optimize-tests"
+  echo "  pi-research -s 3 optimize-bundle"
+  echo "  pi-research cleanup"
+  echo "  pi-research cleanup --all"
+  echo "  pi-research cleanup optimize-tests"
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Shared: resolve repo context
+# ---------------------------------------------------------------------------
+
+resolve_repo() {
+  REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) \
+    || fail "Not in a git repository."
+  REPO_NAME=$(basename "$REPO_ROOT")
+  BASE_BRANCH=$(git -C "$REPO_ROOT" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null \
+    | sed 's|refs/remotes/origin/||') \
+    || BASE_BRANCH=$(git -C "$REPO_ROOT" branch --list main master \
+       | head -1 | tr -d ' *') \
+    || BASE_BRANCH="main"
+}
+
+# ---------------------------------------------------------------------------
+# Cleanup command
+# ---------------------------------------------------------------------------
+
+# Read experiment stats from a worktree's autoresearch.jsonl
+experiment_stats() {
+  local wt_dir="$1"
+  local jsonl="${wt_dir}/autoresearch.jsonl"
+  if [[ -f "$jsonl" ]]; then
+    local total kept
+    total=$(grep -c '"commit"' "$jsonl" 2>/dev/null || echo 0)
+    kept=$(grep -c '"status":"keep"' "$jsonl" 2>/dev/null || echo 0)
+    echo "${kept} kept / ${total} total"
+  else
+    echo "no experiments"
+  fi
+}
+
+# Remove a single worktree + its branch
+remove_worktree() {
+  local wt_path="$1"
+  local branch="$2"
+  local label
+  label=$(basename "$wt_path")
+
+  git -C "$REPO_ROOT" worktree remove "$wt_path" --force 2>/dev/null \
+    || { rm -rf "$wt_path"; git -C "$REPO_ROOT" worktree prune 2>/dev/null || true; }
+
+  git -C "$REPO_ROOT" branch -d "$branch" 2>/dev/null \
+    || git -C "$REPO_ROOT" branch -D "$branch" 2>/dev/null \
+    || true
+
+  echo -e "  ${GREEN}✓${NC} removed ${DIM}${label}${NC}"
+}
+
+cmd_cleanup() {
+  local mode="${1:-interactive}"   # interactive | --all | <slug>
+
+  resolve_repo
+
+  # ── Collect all autoresearch/* worktrees ──────────────────────────────────
+  declare -a WT_PATHS=()
+  declare -a WT_BRANCHES=()
+
+  local cur_path="" cur_branch=""
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*)
+        # Save previous entry if it was autoresearch
+        if [[ -n "$cur_path" && "$cur_branch" == refs/heads/autoresearch/* ]]; then
+          WT_PATHS+=("$cur_path")
+          WT_BRANCHES+=("${cur_branch#refs/heads/}")
+        fi
+        cur_path="${line#worktree }"
+        cur_branch=""
+        ;;
+      "branch "*)
+        cur_branch="${line#branch }"
+        ;;
+    esac
+  done < <(git -C "$REPO_ROOT" worktree list --porcelain)
+  # Flush last entry
+  if [[ -n "$cur_path" && "$cur_branch" == refs/heads/autoresearch/* ]]; then
+    WT_PATHS+=("$cur_path")
+    WT_BRANCHES+=("${cur_branch#refs/heads/}")
+  fi
+
+  # ── Orphaned branches (autoresearch/* with no linked worktree) ────────────
+  declare -a ORPHAN_BRANCHES=()
+  while IFS= read -r b; do
+    b="${b#  }"; b="${b# }"; b="${b#\* }"
+    [[ -z "$b" ]] && continue
+    local found=0
+    for wb in "${WT_BRANCHES[@]+"${WT_BRANCHES[@]}"}"; do
+      [[ "$wb" == "$b" ]] && { found=1; break; }
+    done
+    [[ $found -eq 0 ]] && ORPHAN_BRANCHES+=("$b")
+  done < <(git -C "$REPO_ROOT" branch --list 'autoresearch/*')
+
+  local total_count=$(( ${#WT_PATHS[@]} + ${#ORPHAN_BRANCHES[@]} ))
+  if [[ $total_count -eq 0 ]]; then
+    echo ""
+    echo -e "  ${DIM}No autoresearch worktrees or branches found.${NC}"
+    echo ""
+    exit 0
+  fi
+
+  # ── Merged branch set ─────────────────────────────────────────────────────
+  declare -A IS_MERGED=()
+  while IFS= read -r b; do
+    b="${b#  }"; b="${b# }"; b="${b#\* }"
+    [[ -n "$b" ]] && IS_MERGED["$b"]=1
+  done < <(git -C "$REPO_ROOT" branch --merged "$BASE_BRANCH" --list 'autoresearch/*' 2>/dev/null)
+
+  # ── Slug-match mode: remove one specific worktree ─────────────────────────
+  if [[ "$mode" != "interactive" && "$mode" != "--all" ]]; then
+    local slug="$mode"
+    local matched_path="" matched_branch=""
+    for idx in "${!WT_BRANCHES[@]}"; do
+      if [[ "${WT_BRANCHES[$idx]}" == *"$slug"* ]]; then
+        matched_path="${WT_PATHS[$idx]}"
+        matched_branch="${WT_BRANCHES[$idx]}"
+        break
+      fi
+    done
+    for b in "${ORPHAN_BRANCHES[@]+"${ORPHAN_BRANCHES[@]}"}"; do
+      if [[ "$b" == *"$slug"* ]]; then
+        matched_branch="$b"
+        break
+      fi
+    done
+
+    if [[ -z "$matched_branch" ]]; then
+      fail "No autoresearch worktree or branch matching '${slug}'"
+    fi
+
+    echo ""
+    echo -e "  ${YELLOW}Removing:${NC} ${matched_branch}"
+    if [[ -n "$matched_path" ]]; then
+      echo -e "  ${DIM}path: ${matched_path}${NC}"
+    fi
+    echo ""
+    read -r -p "  Confirm? [y/N] " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "  Aborted."; exit 0; }
+    echo ""
+    remove_worktree "$matched_path" "$matched_branch"
+    echo ""
+    exit 0
+  fi
+
+  # ── Display table ─────────────────────────────────────────────────────────
+  echo ""
+  echo -e "  ${BOLD}Autoresearch worktrees${NC}  ${DIM}(base: ${BASE_BRANCH})${NC}"
+  echo -e "  ${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo ""
+
+  declare -a MERGED_PATHS=()
+  declare -a MERGED_BRANCHES=()
+
+  local idx=1
+  for i in "${!WT_PATHS[@]}"; do
+    local wt="${WT_PATHS[$i]}"
+    local branch="${WT_BRANCHES[$i]}"
+    local stats
+    stats=$(experiment_stats "$wt")
+    local short_branch="${branch#autoresearch/}"
+
+    if [[ -n "${IS_MERGED[$branch]+_}" ]]; then
+      echo -e "  ${GREEN}[${idx}] ✓ merged${NC}   ${branch}"
+      MERGED_PATHS+=("$wt")
+      MERGED_BRANCHES+=("$branch")
+    else
+      echo -e "  ${DIM}[−] ○ active${NC}   ${branch}"
+    fi
+    echo -e "        ${DIM}${wt}${NC}"
+    echo -e "        ${DIM}${stats}${NC}"
+    echo ""
+    ((idx++)) || true
+  done
+
+  if [[ ${#ORPHAN_BRANCHES[@]} -gt 0 ]]; then
+    echo -e "  ${DIM}Orphaned branches (no worktree):${NC}"
+    for b in "${ORPHAN_BRANCHES[@]}"; do
+      if [[ -n "${IS_MERGED[$b]+_}" ]]; then
+        echo -e "  ${GREEN}[${idx}] ✓ merged${NC}   ${b}"
+        MERGED_BRANCHES+=("$b")
+        MERGED_PATHS+=("")
+      else
+        echo -e "  ${DIM}[−] ○ active   ${b}${NC}"
+      fi
+      ((idx++)) || true
+    done
+    echo ""
+  fi
+
+  local merged_count=${#MERGED_BRANCHES[@]}
+
+  if [[ $merged_count -eq 0 ]]; then
+    echo -e "  ${DIM}No merged worktrees to clean up.${NC}"
+    echo ""
+    exit 0
+  fi
+
+  echo -e "  ${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo ""
+  echo -e "  ${merged_count} merged worktree(s) can be removed."
+  echo ""
+
+  # ── Confirm ───────────────────────────────────────────────────────────────
+  if [[ "$mode" != "--all" ]]; then
+    read -r -p "  Remove all merged? [y/N] " confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { echo "  Aborted."; exit 0; }
+  fi
+
+  echo ""
+
+  # ── Remove ────────────────────────────────────────────────────────────────
+  for i in "${!MERGED_BRANCHES[@]}"; do
+    remove_worktree "${MERGED_PATHS[$i]}" "${MERGED_BRANCHES[$i]}"
+  done
+
+  echo ""
+  echo -e "  ${GREEN}${BOLD}Done.${NC} ${merged_count} worktree(s) removed."
+  echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Parse args — route to cleanup or worktree creation
+# ---------------------------------------------------------------------------
+
+if [[ "${1:-}" == "cleanup" ]]; then
+  shift
+  resolve_repo
+  cmd_cleanup "${1:-interactive}"
+  exit 0
+fi
+
+SPLITS=1
+GOAL=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -s)
+      [[ $# -ge 2 ]] || fail "-s requires a number"
+      SPLITS="$2"
+      shift 2
+      ;;
+    -h|--help) usage ;;
+    -*) fail "Unknown flag: $1" ;;
+    *)
+      GOAL="$1"
+      shift
+      ;;
+  esac
+done
+
+[[ "$SPLITS" =~ ^[1-9][0-9]*$ ]] || fail "-s requires a positive integer, got: $SPLITS"
+[[ "$SPLITS" -le 9 ]] || fail "-s max is 9 splits"
+
+# ---------------------------------------------------------------------------
+# Repo context
+# ---------------------------------------------------------------------------
+
+resolve_repo
+
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+
+if [[ -n "$GOAL" ]]; then
+  GOAL_SLUG=$(echo "$GOAL" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-')
+else
+  GOAL_SLUG="session"
+fi
+
+# ---------------------------------------------------------------------------
+# Print banner
+# ---------------------------------------------------------------------------
+
+print_banner
+
+echo -e "  ${DIM}repo:   ${REPO_NAME}${NC}"
+echo -e "  ${DIM}base:   ${BASE_BRANCH}${NC}"
+echo -e "  ${DIM}splits: ${SPLITS}${NC}"
+echo ""
+
+# ---------------------------------------------------------------------------
+# Create worktrees
+# ---------------------------------------------------------------------------
+
+WORKTREES=()
+BRANCHES=()
+LOG=$(mktemp)
+
+for i in $(seq 1 "$SPLITS"); do
+  if [[ "$SPLITS" -eq 1 ]]; then
+    BRANCH="autoresearch/${GOAL_SLUG}-${TIMESTAMP}"
+    WORKTREE_DIR="${REPO_ROOT}/../${REPO_NAME}-research-${GOAL_SLUG}-${TIMESTAMP}"
+  else
+    BRANCH="autoresearch/${GOAL_SLUG}-${TIMESTAMP}-${i}"
+    WORKTREE_DIR="${REPO_ROOT}/../${REPO_NAME}-research-${GOAL_SLUG}-${TIMESTAMP}-${i}"
+  fi
+
+  git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" "$BASE_BRANCH" \
+    >"$LOG" 2>&1 &
+  WT_PID=$!
+
+  bun_progress "[$i/$SPLITS] $(basename "$WORKTREE_DIR")" "$WT_PID"
+
+  wait "$WT_PID" || {
+    echo ""
+    cat "$LOG" >&2
+    fail "Failed to create worktree (branch may already exist: $BRANCH)"
+  }
+
+  echo -e "        ${DIM}↳ branch:  ${BRANCH}${NC}"
+  echo -e "        ${DIM}↳ worktree: ${WORKTREE_DIR}${NC}"
+
+  WORKTREES+=("$WORKTREE_DIR")
+  BRANCHES+=("$BRANCH")
+done
+
+rm -f "$LOG"
+echo ""
+
+# ---------------------------------------------------------------------------
+# Launch
+# ---------------------------------------------------------------------------
+
+if [[ "$SPLITS" -eq 1 ]]; then
+  echo -e "  ${ORANGE}${BOLD}✦ now on worktree 1 / 1${NC}"
+  echo -e "  ${DIM}$(basename "${WORKTREES[0]}")${NC}"
+  echo ""
+  echo -e "  ${ORANGE}${BOLD}launching pi…${NC}"
+  echo ""
+  cd "${WORKTREES[0]}"
+  exec pi
+
+else
+  command -v tmux &>/dev/null || {
+    warn "tmux not found. Install with: brew install tmux"
+    echo ""
+    echo "Worktrees created. Launch pi manually in each:"
+    for wt in "${WORKTREES[@]}"; do
+      echo "  cd $wt && pi"
+    done
+    exit 1
+  }
+
+  SESSION="ar-${GOAL_SLUG}-${TIMESTAMP}"
+
+  if [[ "$SPLITS" -le 3 ]]; then
+    LAYOUT="even-horizontal"
+  else
+    LAYOUT="tiled"
+  fi
+
+  echo ""
+  for i in "${!WORKTREES[@]}"; do
+    echo -e "  ${ORANGE}${BOLD}✦ worktree $((i+1)) / ${SPLITS}${NC}  ${DIM}$(basename "${WORKTREES[$i]}")${NC}"
+  done
+  echo ""
+  echo -e "  ${ORANGE}${BOLD}opening ${SPLITS} tmux panes…${NC}"
+  echo ""
+
+  if [[ -n "${TMUX:-}" ]]; then
+    tmux new-window -c "${WORKTREES[0]}" -n "$GOAL_SLUG"
+    tmux send-keys "pi" Enter
+
+    for i in $(seq 1 $((SPLITS - 1))); do
+      tmux split-window -c "${WORKTREES[$i]}"
+      tmux send-keys "pi" Enter
+      tmux select-layout "$LAYOUT"
+    done
+
+    tmux select-pane -t 0
+  else
+    tmux new-session -d -s "$SESSION" -c "${WORKTREES[0]}"
+    tmux send-keys -t "$SESSION" "pi" Enter
+
+    for i in $(seq 1 $((SPLITS - 1))); do
+      tmux split-window -t "$SESSION" -c "${WORKTREES[$i]}"
+      tmux send-keys -t "$SESSION" "pi" Enter
+      tmux select-layout -t "$SESSION" "$LAYOUT"
+    done
+
+    tmux select-pane -t "$SESSION:0.0"
+    tmux attach-session -t "$SESSION"
+  fi
+fi

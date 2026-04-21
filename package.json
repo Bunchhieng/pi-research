@@ -1,0 +1,15 @@
+{
+  "name": "pi-research",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Worktree launcher and cleanup tools for pi-autoresearch. Wraps git worktree creation, tmux splits, and branch cleanup into a single CLI.",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  }
+}
