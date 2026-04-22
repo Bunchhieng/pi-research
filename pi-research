@@ -29,6 +29,10 @@ info()  { echo -e "${GREEN}$1${NC}"; }
 warn()  { echo -e "${YELLOW}⚠ $1${NC}"; }
 fail()  { echo -e "${RED}ERROR: $1${NC}" >&2; exit 1; }
 
+is_ghostty() {
+  [[ "${TERM_PROGRAM:-}" == "ghostty" ]] || [[ -n "${GHOSTTY_RESOURCES_DIR:-}" ]]
+}
+
 # ---------------------------------------------------------------------------
 # Banner
 # ---------------------------------------------------------------------------
@@ -51,13 +55,10 @@ print_banner() {
   echo -e "                    (  (  /"
   echo -e "                     \\_)\\_)${NC}"
   echo ""
-  local term_width label label_len each_side divider
+  local term_width divider
   term_width=$(tput cols 2>/dev/null || echo 60)
-  label=" built by Bun "
-  label_len=${#label}
-  each_side=$(( (term_width - label_len) / 2 ))
-  divider="$(printf '━%.0s' $(seq 1 "$each_side"))"
-  echo -e "  ${AMBER}${divider}${ORANGE}${BOLD}${label}${NC}${AMBER}${divider}${NC}"
+  divider="$(printf '━%.0s' $(seq 1 "$((term_width - 2))"))"
+  echo -e "  ${AMBER}${divider}${NC}"
   echo ""
 }
 
@@ -95,6 +96,37 @@ bun_progress() {
   bar="$(repeat_char '█' "$width")"
   printf '\r  %-22s \033[38;5;214m[\033[0m%s\033[38;5;214m]\033[0m \033[32m✓\033[0m\n' \
     "$label" "$bar"
+}
+
+# ---------------------------------------------------------------------------
+# Ghostty native split launcher
+# ---------------------------------------------------------------------------
+
+launch_ghostty_splits() {
+  local queue="$HOME/.pi-research-queue"
+
+  # Write commands for splits 2..N into the queue (split 1 uses this pane)
+  : > "$queue"
+  for i in $(seq 1 $((SPLITS - 1))); do
+    printf 'cd %q && exec pi\n' "${WORKTREES[$i]}" >> "$queue"
+  done
+
+  echo ""
+  for i in "${!WORKTREES[@]}"; do
+    echo -e "  ${ORANGE}${BOLD}✦ worktree $((i+1)) / ${SPLITS}${NC}  ${DIM}$(basename "${WORKTREES[$i]}")${NC}"
+  done
+  echo ""
+  echo -e "  ${ORANGE}${BOLD}opening ${SPLITS} Ghostty splits…${NC}"
+  echo -e "  ${DIM}each new pane auto-launches pi in its worktree${NC}"
+  echo ""
+
+  for _ in $(seq 1 $((SPLITS - 1))); do
+    ghostty +send-action new_split:right 2>/dev/null || true
+    sleep 0.25
+  done
+
+  cd "${WORKTREES[0]}"
+  exec pi
 }
 
 # ---------------------------------------------------------------------------
@@ -450,6 +482,9 @@ if [[ "$SPLITS" -eq 1 ]]; then
   echo ""
   cd "${WORKTREES[0]}"
   exec pi
+
+elif is_ghostty; then
+  launch_ghostty_splits
 
 else
   command -v tmux &>/dev/null || {
