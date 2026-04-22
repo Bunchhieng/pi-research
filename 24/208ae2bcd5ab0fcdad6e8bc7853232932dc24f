@@ -1,0 +1,25 @@
+install.sh
+  1a8ddc8263d18fe7 11,86-109
+pi-research
+  1a8ddc8263d18fe7 32-35,58,60-61,101-131,486-488
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.1",
+  "base_commit_sha": "24208ae2bcd5ab0fcdad6e8bc7853232932dc24f",
+  "prompts": {
+    "1a8ddc8263d18fe7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c1eb0c4-04dc-43c6-a365-c2f68e39145c",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Bunchhieng Soth",
+      "messages": [],
+      "total_additions": 66,
+      "total_deletions": 6,
+      "accepted_lines": 259,
+      "overriden_lines": 0
+    }
+  }
+}
