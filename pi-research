@@ -33,40 +33,6 @@ fail()  { echo -e "${RED}ERROR: $1${NC}" >&2; exit 1; }
 
 cpu_count() { sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4; }
 
-# ---------------------------------------------------------------------------
-# Fast worktree creation — sequential git metadata, template-clone for files
-#
-# Strategy for N splits:
-#   Phase 1: git worktree add --no-checkout × N  (sequential — git lock)
-#   Phase 2a: cp -Rc REPO_ROOT → worktree[0]     (single read of large tree)
-#   Phase 2b: cp -Rc worktree[0] → worktrees[1..N-1] in parallel
-#             (reads from page-cached clone, not REPO_ROOT again)
-# ---------------------------------------------------------------------------
-
-_worktree_populate() {
-  local dir="$1" src="$2"
-  local git_ref _item
-  git_ref=$(cat "$dir/.git")
-
-  # APFS COW clone — near-O(1) per file on APFS, falls back to cp -R
-  (
-    shopt -s nullglob 2>/dev/null || true
-    cd "$src"
-    for _item in * .[!.]*; do
-      case "$_item" in
-        .git|node_modules|__pycache__|.next|dist|build|.cache|.venv|venv|.tox|.mypy_cache)
-          continue ;;
-      esac
-      [[ -e "$_item" ]] || continue
-      cp -Rc "$_item" "$dir/$_item" 2>/dev/null || cp -R "$_item" "$dir/$_item" 2>/dev/null || true
-    done
-  )
-
-  # Restore worktree .git pointer, then sync index and force clean HEAD state
-  printf '%s\n' "$git_ref" > "$dir/.git"
-  git -C "$dir" read-tree HEAD 2>/dev/null || true
-  git -C "$dir" checkout-index -f --all 2>/dev/null || true
-}
 
 # ---------------------------------------------------------------------------
 # Banner
@@ -625,12 +591,11 @@ echo -e "  ${DIM}splits: ${SPLITS}${NC}"
 echo ""
 
 # ---------------------------------------------------------------------------
-# Create worktrees — phased for speed and correctness
+# Create worktrees in parallel
 # ---------------------------------------------------------------------------
 
-WORKTREES=(); BRANCHES=()
+WORKTREES=(); BRANCHES=(); WT_PIDS=(); WT_LOGS=()
 
-# Phase 1: git metadata for all worktrees — must be sequential (git lock)
 for i in $(seq 1 "$SPLITS"); do
   if [[ "$SPLITS" -eq 1 ]]; then
     BRANCH="autoresearch/${GOAL_SLUG}-${TIMESTAMP}"
@@ -640,50 +605,29 @@ for i in $(seq 1 "$SPLITS"); do
     WORKTREE_DIR="${REPO_ROOT}/../${REPO_NAME}-research-${GOAL_SLUG}-${TIMESTAMP}-${i}"
   fi
   WORKTREES+=("$WORKTREE_DIR"); BRANCHES+=("$BRANCH")
-  git -C "$REPO_ROOT" worktree add --no-checkout "$WORKTREE_DIR" -b "$BRANCH" "$BASE_BRANCH" \
-    || fail "Failed to create worktree: $BRANCH"
+  WT_LOGS+=("$(mktemp)")
+  git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" "$BASE_BRANCH" \
+    >"${WT_LOGS[-1]}" 2>&1 &
+  WT_PIDS+=($!)
 done
 
-# Phase 2a: populate template worktree from REPO_ROOT (single read of large tree)
-_LOG0=$(mktemp)
-_worktree_populate "${WORKTREES[0]}" "$REPO_ROOT" >"$_LOG0" 2>&1 &
-_PID0=$!
 if [[ "$SPLITS" -eq 1 ]]; then
-  bun_progress "[1/1] $(basename "${WORKTREES[0]}")" "$_PID0"
+  bun_progress "[1/1] $(basename "${WORKTREES[0]}")" "${WT_PIDS[0]}"
 else
-  bun_progress "[1/${SPLITS}] template" "$_PID0"
+  bun_progress "creating ${SPLITS} worktrees" "${WT_PIDS[@]}"
 fi
-wait "$_PID0" || { cat "$_LOG0" >&2; rm -f "$_LOG0"; fail "Failed to populate: ${BRANCHES[0]}"; }
-rm -f "$_LOG0"
-echo -e "  ${GREEN}✓${NC}  ${DIM}$(basename "${WORKTREES[0]}")${NC}"
-echo -e "      ${DIM}↳ branch:   ${BRANCHES[0]}${NC}"
-echo -e "      ${DIM}↳ worktree: ${WORKTREES[0]}${NC}"
 
-# Phase 2b: clone remaining worktrees from template in parallel
-# (reads from page-cached clone, avoids re-reading REPO_ROOT)
-if [[ "$SPLITS" -gt 1 ]]; then
-  WT_PIDS=(); WT_LOGS=()
-  for j in $(seq 1 $((SPLITS - 1))); do
-    WT_LOGS+=("$(mktemp)")
-    _worktree_populate "${WORKTREES[$j]}" "${WORKTREES[0]}" >"${WT_LOGS[-1]}" 2>&1 &
-    WT_PIDS+=($!)
-  done
-
-  bun_progress "cloning $((SPLITS-1)) more" "${WT_PIDS[@]}"
-
-  for k in "${!WT_PIDS[@]}"; do
-    real_idx=$(( k + 1 ))
-    wait "${WT_PIDS[$k]}" || {
-      cat "${WT_LOGS[$k]}" >&2
-      rm -f "${WT_LOGS[$k]}"
-      fail "Failed to populate: ${BRANCHES[$real_idx]}"
-    }
-    rm -f "${WT_LOGS[$k]}"
-    echo -e "  ${GREEN}✓${NC}  ${DIM}$(basename "${WORKTREES[$real_idx]}")${NC}"
-    echo -e "      ${DIM}↳ branch:   ${BRANCHES[$real_idx]}${NC}"
-    echo -e "      ${DIM}↳ worktree: ${WORKTREES[$real_idx]}${NC}"
-  done
-fi
+for i in "${!WT_PIDS[@]}"; do
+  wait "${WT_PIDS[$i]}" || {
+    echo ""
+    cat "${WT_LOGS[$i]}" >&2
+    fail "Failed to create worktree: ${BRANCHES[$i]}"
+  }
+  rm -f "${WT_LOGS[$i]}"
+  echo -e "  ${GREEN}✓${NC}  ${DIM}$(basename "${WORKTREES[$i]}")${NC}"
+  echo -e "      ${DIM}↳ branch:   ${BRANCHES[$i]}${NC}"
+  echo -e "      ${DIM}↳ worktree: ${WORKTREES[$i]}${NC}"
+done
 
 echo ""
 
