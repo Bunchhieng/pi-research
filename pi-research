@@ -49,16 +49,12 @@ print_banner() {
   echo -e "${NC}"
   echo -e "            ${CREAM}e x p e r i m e n t i n g${NC}"
   echo ""
-  echo -e "                      ${BROWN}(\\  /"
-  echo -e "                      (•ω• )  ♡"
-  echo -e "                     ／|  づ"
-  echo -e "                    (  (  /"
-  echo -e "                     \\_)\\_)${NC}"
-  echo ""
-  local term_width divider
-  term_width=$(tput cols 2>/dev/null || echo 60)
-  divider="$(printf '━%.0s' $(seq 1 "$((term_width - 2))"))"
-  echo -e "  ${AMBER}${divider}${NC}"
+  echo -e "                  ${ORANGE}/\\   /\\"
+  echo -e "                 /  \\_/  \\"
+  echo -e "                | ( o o ) |"
+  echo -e "                |   /\\   |"
+  echo -e "                 \\  ---  /"
+  echo -e "                  '-----'${NC}"
   echo ""
 }
 
