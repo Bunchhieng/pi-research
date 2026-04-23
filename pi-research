@@ -80,22 +80,25 @@ repeat_char() {
   printf '%s' "$result"
 }
 
-# bun_progress <label> <pid>
+# bun_progress <label> <pid...>  — animates until ALL given pids finish
 bun_progress() {
   local label="$1"
-  local pid="$2"
-  local width=32
-  local i=0
+  shift
+  local pids=("$@")
+  local width=32 i=0
   local frames=('(\(\  ' '(•ω•) ' '(/(\  ' '(•ω•) ')
 
-  while kill -0 "$pid" 2>/dev/null; do
+  while true; do
+    local running=0
+    for pid in "${pids[@]}"; do
+      kill -0 "$pid" 2>/dev/null && running=1 && break
+    done
+    [[ $running -eq 0 ]] && break
     local filled=$(( i % (width + 1) ))
-    local empty=$(( width - filled ))
     local bar
-    bar="$(repeat_char '█' "$filled")$(repeat_char '░' "$empty")"
-    local frame="${frames[$((i % 4))]}"
+    bar="$(repeat_char '█' "$filled")$(repeat_char '░' "$((width - filled))")"
     printf '\r  %-22s \033[38;5;214m[\033[0m%s\033[38;5;214m]\033[0m \033[38;5;172m%s\033[0m' \
-      "$label" "$bar" "$frame"
+      "$label" "$bar" "${frames[$((i % 4))]}"
     ((i++)) || true
     sleep 0.04
   done
@@ -501,8 +504,10 @@ echo ""
 
 WORKTREES=()
 BRANCHES=()
-LOG=$(mktemp)
+WT_PIDS=()
+WT_LOGS=()
 
+# Compute all paths/branches and fire git worktree add in parallel
 for i in $(seq 1 "$SPLITS"); do
   if [[ "$SPLITS" -eq 1 ]]; then
     BRANCH="autoresearch/${GOAL_SLUG}-${TIMESTAMP}"
@@ -512,26 +517,35 @@ for i in $(seq 1 "$SPLITS"); do
     WORKTREE_DIR="${REPO_ROOT}/../${REPO_NAME}-research-${GOAL_SLUG}-${TIMESTAMP}-${i}"
   fi
 
-  git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" "$BASE_BRANCH" \
-    >"$LOG" 2>&1 &
-  WT_PID=$!
-
-  bun_progress "[$i/$SPLITS] $(basename "$WORKTREE_DIR")" "$WT_PID"
-
-  wait "$WT_PID" || {
-    echo ""
-    cat "$LOG" >&2
-    fail "Failed to create worktree (branch may already exist: $BRANCH)"
-  }
-
-  echo -e "        ${DIM}↳ branch:  ${BRANCH}${NC}"
-  echo -e "        ${DIM}↳ worktree: ${WORKTREE_DIR}${NC}"
-
   WORKTREES+=("$WORKTREE_DIR")
   BRANCHES+=("$BRANCH")
+  WT_LOGS+=("$(mktemp)")
+
+  git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" "$BASE_BRANCH" \
+    >"${WT_LOGS[-1]}" 2>&1 &
+  WT_PIDS+=($!)
 done
 
-rm -f "$LOG"
+# Single progress bar covers all parallel jobs
+if [[ "$SPLITS" -eq 1 ]]; then
+  bun_progress "[1/1] $(basename "${WORKTREES[0]}")" "${WT_PIDS[0]}"
+else
+  bun_progress "creating ${SPLITS} worktrees" "${WT_PIDS[@]}"
+fi
+
+# Collect results — fail fast on any error, print summary for successes
+for i in "${!WT_PIDS[@]}"; do
+  wait "${WT_PIDS[$i]}" || {
+    echo ""
+    cat "${WT_LOGS[$i]}" >&2
+    fail "Failed to create worktree: ${BRANCHES[$i]}"
+  }
+  echo -e "  ${GREEN}✓${NC}  ${DIM}$(basename "${WORKTREES[$i]}")${NC}"
+  echo -e "      ${DIM}↳ branch:   ${BRANCHES[$i]}${NC}"
+  echo -e "      ${DIM}↳ worktree: ${WORKTREES[$i]}${NC}"
+  rm -f "${WT_LOGS[$i]}"
+done
+
 echo ""
 
 # ---------------------------------------------------------------------------
