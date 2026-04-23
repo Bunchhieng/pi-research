@@ -136,23 +136,20 @@ cmd_status() {
     exit 0
   fi
 
-  # Build path → session map from tmux
-  declare -A PANE_SESSION=()
-  declare -A SESSION_ATTACHED=()
+  # Collect tmux state as plain text (bash 3.2: no associative arrays)
+  local tmux_panes="" attached_sessions=""
   if command -v tmux &>/dev/null; then
-    while IFS=$'\t' read -r ppath sname sattached; do
-      [[ -n "$ppath" ]] && PANE_SESSION["$ppath"]="$sname"
-      SESSION_ATTACHED["$sname"]="$sattached"
-    done < <(tmux list-panes -a \
-      -F "#{pane_current_path}\t#{session_name}\t#{session_attached}" 2>/dev/null || true)
+    tmux_panes=$(tmux list-panes -a \
+      -F "#{pane_current_path}\t#{session_name}" 2>/dev/null || true)
+    attached_sessions=$(tmux list-sessions \
+      -F "#{session_name} #{session_attached}" 2>/dev/null \
+      | awk '$2==1{print $1}' || true)
   fi
 
-  # Merged branch set
-  declare -A IS_MERGED=()
-  while IFS= read -r b; do
-    b="${b#  }"; b="${b# }"; b="${b#\* }"
-    [[ -n "$b" ]] && IS_MERGED["$b"]=1
-  done < <(git -C "$REPO_ROOT" branch --merged "$BASE_BRANCH" --list 'autoresearch/*' 2>/dev/null)
+  # Merged branches as plain text
+  local merged_branches
+  merged_branches=$(git -C "$REPO_ROOT" branch --merged "$BASE_BRANCH" \
+    --list 'autoresearch/*' 2>/dev/null || true)
 
   echo ""
   echo -e "  ${BOLD}Research sessions${NC}  ${DIM}repo: ${REPO_NAME}  base: ${BASE_BRANCH}${NC}"
@@ -165,17 +162,23 @@ cmd_status() {
 
     # Merged badge
     local merged_badge=""
-    [[ -n "${IS_MERGED[$branch]+_}" ]] && merged_badge=" ${GREEN}[merged]${NC}"
+    echo "$merged_branches" | grep -qF "$branch" && merged_badge=" ${GREEN}[merged]${NC}"
 
     # Age
     local age
     age=$(git -C "$wt" log -1 --format="%ar" 2>/dev/null || echo "unknown")
 
-    # Tmux session
-    local sess="${PANE_SESSION[$wt]:-}"
+    # Find tmux session whose pane CWD starts with this worktree path
+    local sess=""
+    while IFS=$'\t' read -r ppath sname; do
+      if [[ "$ppath" == "$wt"* ]]; then
+        sess="$sname"; break
+      fi
+    done <<< "$tmux_panes"
+
     local tmux_label
     if [[ -n "$sess" ]]; then
-      if [[ "${SESSION_ATTACHED[$sess]:-0}" == "1" ]]; then
+      if echo "$attached_sessions" | grep -qx "$sess"; then
         tmux_label="${GREEN}● ${sess} (attached)${NC}"
       else
         tmux_label="${YELLOW}● ${sess} (detached)${NC}"
@@ -184,7 +187,6 @@ cmd_status() {
       tmux_label="${DIM}— no session${NC}"
     fi
 
-    # Experiment stats
     local stats
     stats=$(experiment_stats "$wt")
 
@@ -394,12 +396,10 @@ cmd_cleanup() {
     exit 0
   fi
 
-  # ── Merged branch set ─────────────────────────────────────────────────────
-  declare -A IS_MERGED=()
-  while IFS= read -r b; do
-    b="${b#  }"; b="${b# }"; b="${b#\* }"
-    [[ -n "$b" ]] && IS_MERGED["$b"]=1
-  done < <(git -C "$REPO_ROOT" branch --merged "$BASE_BRANCH" --list 'autoresearch/*' 2>/dev/null)
+  # ── Merged branch set (plain text, bash 3.2 compat) ─────────────────────
+  local MERGED_SET
+  MERGED_SET=$(git -C "$REPO_ROOT" branch --merged "$BASE_BRANCH" \
+    --list 'autoresearch/*' 2>/dev/null || true)
 
   # ── Slug-match mode: remove one specific worktree ─────────────────────────
   if [[ "$mode" != "interactive" && "$mode" != "--all" ]]; then
@@ -454,7 +454,7 @@ cmd_cleanup() {
     stats=$(experiment_stats "$wt")
     local short_branch="${branch#autoresearch/}"
 
-    if [[ -n "${IS_MERGED[$branch]+_}" ]]; then
+    if echo "$MERGED_SET" | grep -qF "$branch"; then
       echo -e "  ${GREEN}[${idx}] ✓ merged${NC}   ${branch}"
       MERGED_PATHS+=("$wt")
       MERGED_BRANCHES+=("$branch")
@@ -470,7 +470,7 @@ cmd_cleanup() {
   if [[ ${#ORPHAN_BRANCHES[@]} -gt 0 ]]; then
     echo -e "  ${DIM}Orphaned branches (no worktree):${NC}"
     for b in "${ORPHAN_BRANCHES[@]}"; do
-      if [[ -n "${IS_MERGED[$b]+_}" ]]; then
+      if echo "$MERGED_SET" | grep -qF "$b"; then
         echo -e "  ${GREEN}[${idx}] ✓ merged${NC}   ${b}"
         MERGED_BRANCHES+=("$b")
         MERGED_PATHS+=("")
