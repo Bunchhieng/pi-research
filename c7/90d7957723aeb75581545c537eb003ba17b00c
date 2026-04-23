@@ -1,0 +1,23 @@
+pi-research
+  1a8ddc8263d18fe7 36-47,110,113-125,133-134,146-184,542-550
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.1",
+  "base_commit_sha": "c790d7957723aeb75581545c537eb003ba17b00c",
+  "prompts": {
+    "1a8ddc8263d18fe7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "0c1eb0c4-04dc-43c6-a365-c2f68e39145c",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Bunchhieng Soth",
+      "messages": [],
+      "total_additions": 76,
+      "total_deletions": 10,
+      "accepted_lines": 269,
+      "overriden_lines": 0
+    }
+  }
+}
