@@ -34,94 +34,38 @@ fail()  { echo -e "${RED}ERROR: $1${NC}" >&2; exit 1; }
 cpu_count() { sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4; }
 
 # ---------------------------------------------------------------------------
-# Pre-warm pool — keeps 2 ready worktrees so startup is near-instant
+# Fast worktree creation via APFS copy-on-write clonefiles
 # ---------------------------------------------------------------------------
 
-pool_dir()  { echo "$HOME/.pi-research-pool/${REPO_NAME}"; }
+fast_worktree_add() {
+  local dir="$1" branch="$2"
+  local git_ref _item
 
-pool_prune() {
-  local pdir="$1" base_commit="$2"
-  [[ -d "$pdir" ]] || return 0
-  for entry in "$pdir"/*/; do
-    [[ -d "$entry" ]] || continue
-    local stored wt_path branch
-    stored=$(cat "${entry}base"   2>/dev/null || true)
-    wt_path=$(cat "${entry}path"  2>/dev/null || true)
-    branch=$(cat "${entry}branch" 2>/dev/null || true)
-    if [[ "$stored" != "$base_commit" || -z "$wt_path" || ! -d "$wt_path" ]]; then
-      [[ -n "$wt_path" ]] && git -C "$REPO_ROOT" worktree remove --force "$wt_path" 2>/dev/null || true
-      [[ -n "$branch"  ]] && git -C "$REPO_ROOT" branch -D "$branch" 2>/dev/null || true
-      rm -rf "$entry"
-    fi
-  done
-}
+  # Step 1: git metadata only — no file writes (milliseconds)
+  git -C "$REPO_ROOT" worktree add --no-checkout "$dir" -b "$branch" "$BASE_BRANCH"
+  git_ref=$(cat "$dir/.git")
 
-# Claim one pool entry: rename its branch + move worktree to target location.
-# Returns 0 on success, 1 if nothing usable in pool.
-pool_claim() {
-  local pdir="$1" target_dir="$2" target_branch="$3" base_commit="$4"
-  [[ -d "$pdir" ]] || return 1
-  for entry in "$pdir"/*/; do
-    [[ -d "$entry" ]] || continue
-    local stored pool_branch pool_path
-    stored=$(cat "${entry}base"   2>/dev/null || true)
-    pool_branch=$(cat "${entry}branch" 2>/dev/null || true)
-    pool_path=$(cat "${entry}path" 2>/dev/null || true)
-    [[ "$stored" == "$base_commit" && -n "$pool_branch" && -d "$pool_path" ]] || continue
-    git -C "$REPO_ROOT" branch -m "$pool_branch" "$target_branch" 2>/dev/null || continue
-    if git -C "$REPO_ROOT" worktree move "$pool_path" "$target_dir" 2>/dev/null; then
-      rm -rf "$entry"
-      return 0
-    fi
-    git -C "$REPO_ROOT" branch -m "$target_branch" "$pool_branch" 2>/dev/null || true
-  done
-  return 1
-}
-
-pool_create_one() {
-  local pdir="$1" base_commit="$2"
-  mkdir -p "$pdir"
-  local ts entry pool_branch wt_path
-  ts="$(date +%Y%m%d-%H%M%S)-$$-${RANDOM}"
-  entry="${pdir}/${ts}"
-  pool_branch="autoresearch/pool-${ts}"
-  wt_path="${entry}/worktree"
-  mkdir -p "$entry"
-  git -C "$REPO_ROOT" -c checkout.workers="$(cpu_count)" \
-    worktree add "$wt_path" -b "$pool_branch" "$BASE_BRANCH" >"${entry}/log" 2>&1 \
-  && {
-    printf '%s' "$base_commit"  > "${entry}/base"
-    printf '%s' "$pool_branch"  > "${entry}/branch"
-    printf '%s' "$wt_path"      > "${entry}/path"
-    rm -f "${entry}/log"
-  } || {
-    git -C "$REPO_ROOT" worktree remove --force "$wt_path" 2>/dev/null || true
-    git -C "$REPO_ROOT" branch -D "$pool_branch" 2>/dev/null || true
-    git -C "$REPO_ROOT" worktree prune 2>/dev/null || true
-    rm -rf "$entry"
-  }
-}
-
-# Silently refill pool to 2 warm entries (called in background after each launch)
-pool_replenish() {
-  local pdir base_commit count needed
-  pdir=$(pool_dir)
-  base_commit=$(git -C "$REPO_ROOT" rev-parse "$BASE_BRANCH" 2>/dev/null) || return 0
-  count=0
-  if [[ -d "$pdir" ]]; then
-    for entry in "$pdir"/*/; do
-      [[ -f "${entry}base" ]] || continue
-      local stored wt_path
-      stored=$(cat "${entry}base" 2>/dev/null || true)
-      wt_path=$(cat "${entry}path" 2>/dev/null || true)
-      [[ "$stored" == "$base_commit" && -d "$wt_path" ]] && count=$(( count + 1 )) || true
+  # Step 2: APFS copy-on-write clone from main repo — near-O(1) on APFS
+  (
+    shopt -s nullglob 2>/dev/null || true
+    cd "$REPO_ROOT"
+    for _item in * .[!.]*; do
+      case "$_item" in
+        .git|node_modules|__pycache__|.next|dist|build|.cache|.venv|venv|.tox|.mypy_cache)
+          continue ;;
+      esac
+      [[ -e "$_item" ]] || continue
+      cp -Rc "$_item" "$dir/$_item" 2>/dev/null || cp -R "$_item" "$dir/$_item" 2>/dev/null || true
     done
-  fi
-  needed=$(( 2 - count ))
-  for _ in $(seq 1 "$needed"); do
-    pool_create_one "$pdir" "$base_commit" &
-  done
-  wait
+  )
+
+  # Restore the worktree .git pointer (cp may have clobbered it)
+  printf '%s\n' "$git_ref" > "$dir/.git"
+
+  # Step 3: update index to HEAD — no disk writes
+  git -C "$dir" read-tree HEAD 2>/dev/null || true
+  # Step 4: overwrite any files that differ from HEAD — usually a no-op
+  git -C "$dir" checkout-index --all 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -681,18 +625,13 @@ echo -e "  ${DIM}splits: ${SPLITS}${NC}"
 echo ""
 
 # ---------------------------------------------------------------------------
-# Create worktrees — pool-first, parallel git worktree add as fallback
+# Create worktrees in parallel — APFS clonefiles (near-instant)
 # ---------------------------------------------------------------------------
-
-BASE_COMMIT=$(git -C "$REPO_ROOT" rev-parse "$BASE_BRANCH" 2>/dev/null || true)
-POOL_HOME=$(pool_dir)
-pool_prune "$POOL_HOME" "$BASE_COMMIT"
 
 WORKTREES=()
 BRANCHES=()
 WT_PIDS=()
 WT_LOGS=()
-POOL_HITS=0
 
 for i in $(seq 1 "$SPLITS"); do
   if [[ "$SPLITS" -eq 1 ]]; then
@@ -704,59 +643,30 @@ for i in $(seq 1 "$SPLITS"); do
   fi
   WORKTREES+=("$WORKTREE_DIR")
   BRANCHES+=("$BRANCH")
-
-  if pool_claim "$POOL_HOME" "$WORKTREE_DIR" "$BRANCH" "$BASE_COMMIT"; then
-    WT_PIDS+=("")
-    WT_LOGS+=("")
-    POOL_HITS=$(( POOL_HITS + 1 ))
-  else
-    WT_LOGS+=("$(mktemp)")
-    git -C "$REPO_ROOT" -c checkout.workers="$(cpu_count)" \
-      worktree add "$WORKTREE_DIR" -b "$BRANCH" "$BASE_BRANCH" \
-      >"${WT_LOGS[-1]}" 2>&1 &
-    WT_PIDS+=($!)
-  fi
+  WT_LOGS+=("$(mktemp)")
+  fast_worktree_add "$WORKTREE_DIR" "$BRANCH" >"${WT_LOGS[-1]}" 2>&1 &
+  WT_PIDS+=($!)
 done
 
-# Collect PIDs that actually need waiting
-ACTIVE_PIDS=()
-for _pid in "${WT_PIDS[@]+"${WT_PIDS[@]}"}"; do
-  [[ -n "$_pid" ]] && ACTIVE_PIDS+=("$_pid") || true
-done
-
-if [[ ${#ACTIVE_PIDS[@]} -gt 0 ]]; then
-  FRESH=$(( SPLITS - POOL_HITS ))
-  if [[ "$SPLITS" -eq 1 ]]; then
-    bun_progress "[1/1] $(basename "${WORKTREES[0]}")" "${ACTIVE_PIDS[0]}"
-  else
-    bun_progress "creating ${FRESH} worktrees" "${ACTIVE_PIDS[@]}"
-  fi
-elif [[ $POOL_HITS -gt 0 ]]; then
-  echo -e "  ${GREEN}⚡ all ${POOL_HITS} from pool — instant!${NC}"
+if [[ "$SPLITS" -eq 1 ]]; then
+  bun_progress "[1/1] $(basename "${WORKTREES[0]}")" "${WT_PIDS[0]}"
+else
+  bun_progress "creating ${SPLITS} worktrees" "${WT_PIDS[@]}"
 fi
 
 for i in "${!WT_PIDS[@]}"; do
-  _pid="${WT_PIDS[$i]}"
-  if [[ -n "$_pid" ]]; then
-    wait "$_pid" || {
-      echo ""
-      cat "${WT_LOGS[$i]}" >&2
-      fail "Failed to create worktree: ${BRANCHES[$i]}"
-    }
-    rm -f "${WT_LOGS[$i]}"
-    echo -e "  ${GREEN}✓${NC}  ${DIM}$(basename "${WORKTREES[$i]}")${NC}"
-  else
-    echo -e "  ${GREEN}⚡${NC}  ${DIM}$(basename "${WORKTREES[$i]}")${NC}  ${DIM}(pool)${NC}"
-  fi
+  wait "${WT_PIDS[$i]}" || {
+    echo ""
+    cat "${WT_LOGS[$i]}" >&2
+    fail "Failed to create worktree: ${BRANCHES[$i]}"
+  }
+  rm -f "${WT_LOGS[$i]}"
+  echo -e "  ${GREEN}✓${NC}  ${DIM}$(basename "${WORKTREES[$i]}")${NC}"
   echo -e "      ${DIM}↳ branch:   ${BRANCHES[$i]}${NC}"
   echo -e "      ${DIM}↳ worktree: ${WORKTREES[$i]}${NC}"
 done
 
 echo ""
-
-# Silently refill pool in background so next run is fast too
-( pool_replenish ) >/dev/null 2>&1 &
-disown 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Launch
