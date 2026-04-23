@@ -33,6 +33,18 @@ is_ghostty() {
   [[ "${TERM_PROGRAM:-}" == "ghostty" ]] || [[ -n "${GHOSTTY_RESOURCES_DIR:-}" ]]
 }
 
+is_iterm() {
+  [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]]
+}
+
+is_wezterm() {
+  [[ "${TERM_PROGRAM:-}" == "WezTerm" ]] || [[ -n "${WEZTERM_PANE:-}" ]]
+}
+
+is_kitty() {
+  [[ -n "${KITTY_WINDOW_ID:-}" ]]
+}
+
 # ---------------------------------------------------------------------------
 # Banner
 # ---------------------------------------------------------------------------
@@ -95,25 +107,31 @@ bun_progress() {
 }
 
 # ---------------------------------------------------------------------------
-# Ghostty native split launcher
+# Multi-split launchers
 # ---------------------------------------------------------------------------
 
-launch_ghostty_splits() {
-  local queue="$HOME/.pi-research-queue"
-
-  # Write commands for splits 2..N into the queue (split 1 uses this pane)
-  : > "$queue"
-  for i in $(seq 1 $((SPLITS - 1))); do
-    printf 'cd %q && exec pi\n' "${WORKTREES[$i]}" >> "$queue"
-  done
-
+_show_split_header() {
+  local term_name="$1"
   echo ""
   for i in "${!WORKTREES[@]}"; do
     echo -e "  ${ORANGE}${BOLD}✦ worktree $((i+1)) / ${SPLITS}${NC}  ${DIM}$(basename "${WORKTREES[$i]}")${NC}"
   done
   echo ""
-  echo -e "  ${ORANGE}${BOLD}opening ${SPLITS} Ghostty splits…${NC}"
-  echo -e "  ${DIM}each new pane auto-launches pi in its worktree${NC}"
+  echo -e "  ${ORANGE}${BOLD}opening ${SPLITS} ${term_name} splits…${NC}"
+  echo ""
+}
+
+# Ghostty: can't inject a command into splits, so use a launch queue.
+# Each new pane shell reads ~/.pi-research-queue on startup via the zshrc hook.
+launch_ghostty_splits() {
+  local queue="$HOME/.pi-research-queue"
+  : > "$queue"
+  for i in $(seq 1 $((SPLITS - 1))); do
+    printf 'cd %q && exec pi\n' "${WORKTREES[$i]}" >> "$queue"
+  done
+
+  _show_split_header "Ghostty"
+  echo -e "  ${DIM}each new pane auto-launches pi via ~/.pi-research-queue${NC}"
   echo ""
 
   for _ in $(seq 1 $((SPLITS - 1))); do
@@ -121,6 +139,45 @@ launch_ghostty_splits() {
     sleep 0.25
   done
 
+  cd "${WORKTREES[0]}"
+  exec pi
+}
+
+# iTerm2: AppleScript can open a split and run a command directly.
+launch_iterm_splits() {
+  _show_split_header "iTerm2"
+  for i in $(seq 1 $((SPLITS - 1))); do
+    osascript > /dev/null 2>&1 <<APPLE
+tell application "iTerm2"
+  tell current session of current window
+    split vertically with default profile command "cd ${WORKTREES[$i]} && exec pi"
+  end tell
+end tell
+APPLE
+    sleep 0.2
+  done
+  cd "${WORKTREES[0]}"
+  exec pi
+}
+
+# WezTerm: wezterm CLI can split and run a command in the new pane.
+launch_wezterm_splits() {
+  _show_split_header "WezTerm"
+  for i in $(seq 1 $((SPLITS - 1))); do
+    wezterm cli split-pane --right --cwd "${WORKTREES[$i]}" -- pi 2>/dev/null || true
+    sleep 0.1
+  done
+  cd "${WORKTREES[0]}"
+  exec pi
+}
+
+# Kitty: kitty @ launch opens a new window/tab and runs a command directly.
+launch_kitty_splits() {
+  _show_split_header "Kitty"
+  for i in $(seq 1 $((SPLITS - 1))); do
+    kitty @ launch --type=window --cwd="${WORKTREES[$i]}" -- pi 2>/dev/null || true
+    sleep 0.1
+  done
   cd "${WORKTREES[0]}"
   exec pi
 }
@@ -481,6 +538,15 @@ if [[ "$SPLITS" -eq 1 ]]; then
 
 elif is_ghostty; then
   launch_ghostty_splits
+
+elif is_iterm; then
+  launch_iterm_splits
+
+elif is_wezterm; then
+  launch_wezterm_splits
+
+elif is_kitty; then
+  launch_kitty_splits
 
 else
   command -v tmux &>/dev/null || {
