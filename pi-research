@@ -613,21 +613,40 @@ done
 
 if [[ "$SPLITS" -eq 1 ]]; then
   bun_progress "[1/1] $(basename "${WORKTREES[0]}")" "${WT_PIDS[0]}"
+  wait "${WT_PIDS[0]}" || { echo ""; cat "${WT_LOGS[0]}" >&2; fail "Failed to create worktree: ${BRANCHES[0]}"; }
+  rm -f "${WT_LOGS[0]}"
+  echo -e "  ${GREEN}✓${NC}  ${DIM}$(basename "${WORKTREES[0]}")${NC}"
+  echo -e "      ${DIM}↳ branch:   ${BRANCHES[0]}${NC}"
+  echo -e "      ${DIM}↳ worktree: ${WORKTREES[0]}${NC}"
 else
-  bun_progress "creating ${SPLITS} worktrees" "${WT_PIDS[@]}"
-fi
+  # Poll all jobs; print each worktree's info as it finishes
+  _SPIN=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  _WT_DONE=()
+  for _x in "${!WT_PIDS[@]}"; do _WT_DONE+=(""); done
+  _done_count=0; _spin_i=0
 
-for i in "${!WT_PIDS[@]}"; do
-  wait "${WT_PIDS[$i]}" || {
-    echo ""
-    cat "${WT_LOGS[$i]}" >&2
-    fail "Failed to create worktree: ${BRANCHES[$i]}"
-  }
-  rm -f "${WT_LOGS[$i]}"
-  echo -e "  ${GREEN}✓${NC}  ${DIM}$(basename "${WORKTREES[$i]}")${NC}"
-  echo -e "      ${DIM}↳ branch:   ${BRANCHES[$i]}${NC}"
-  echo -e "      ${DIM}↳ worktree: ${WORKTREES[$i]}${NC}"
-done
+  while [[ $_done_count -lt $SPLITS ]]; do
+    for i in "${!WT_PIDS[@]}"; do
+      [[ -n "${_WT_DONE[$i]}" ]] && continue
+      if ! kill -0 "${WT_PIDS[$i]}" 2>/dev/null; then
+        printf '\r\033[K'
+        wait "${WT_PIDS[$i]}" || { echo ""; cat "${WT_LOGS[$i]}" >&2; fail "Failed to create worktree: ${BRANCHES[$i]}"; }
+        rm -f "${WT_LOGS[$i]}"
+        _WT_DONE[$i]="1"
+        _done_count=$(( _done_count + 1 ))
+        echo -e "  ${GREEN}✓${NC}  [${_done_count}/${SPLITS}] ${DIM}$(basename "${WORKTREES[$i]}")${NC}"
+        echo -e "        ${DIM}↳ branch:   ${BRANCHES[$i]}${NC}"
+        echo -e "        ${DIM}↳ worktree: ${WORKTREES[$i]}${NC}"
+      fi
+    done
+    [[ $_done_count -eq $SPLITS ]] && break
+    printf '\r  \033[38;5;214m%s\033[0m  %d/%d done…  ' \
+      "${_SPIN[$(( _spin_i % 10 ))]}" "$_done_count" "$SPLITS"
+    _spin_i=$(( _spin_i + 1 ))
+    sleep 0.1
+  done
+  printf '\r\033[K'
+fi
 
 echo ""
 
