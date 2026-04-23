@@ -6,6 +6,8 @@ set -euo pipefail
 # Usage:
 #   pi-research [goal]              Single worktree, launches pi
 #   pi-research -s N [goal]         N worktrees in tmux splits
+#   pi-research status              Dashboard of all active research sessions
+#   pi-research attach [slug]       Re-attach to a running tmux session
 #   pi-research cleanup             Interactive cleanup of merged worktrees
 #   pi-research cleanup --all       Remove all merged worktrees without prompt
 #   pi-research cleanup <slug>      Remove a specific worktree by name match
@@ -94,6 +96,195 @@ bun_progress() {
 }
 
 # ---------------------------------------------------------------------------
+# Shared: collect autoresearch/* worktrees into AR_PATHS / AR_BRANCHES
+# ---------------------------------------------------------------------------
+
+collect_ar_worktrees() {
+  AR_PATHS=()
+  AR_BRANCHES=()
+  local cur_path="" cur_branch=""
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*)
+        if [[ -n "$cur_path" && "$cur_branch" == refs/heads/autoresearch/* ]]; then
+          AR_PATHS+=("$cur_path"); AR_BRANCHES+=("${cur_branch#refs/heads/}")
+        fi
+        cur_path="${line#worktree }"; cur_branch=""
+        ;;
+      "branch "*) cur_branch="${line#branch }" ;;
+    esac
+  done < <(git -C "$REPO_ROOT" worktree list --porcelain)
+  if [[ -n "$cur_path" && "$cur_branch" == refs/heads/autoresearch/* ]]; then
+    AR_PATHS+=("$cur_path"); AR_BRANCHES+=("${cur_branch#refs/heads/}")
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Status command
+# ---------------------------------------------------------------------------
+
+cmd_status() {
+  resolve_repo
+
+  declare -a AR_PATHS=() AR_BRANCHES=()
+  collect_ar_worktrees
+
+  if [[ ${#AR_PATHS[@]} -eq 0 ]]; then
+    echo ""
+    echo -e "  ${DIM}No autoresearch worktrees found. Run pi-research to start one.${NC}"
+    echo ""
+    exit 0
+  fi
+
+  # Build path → session map from tmux
+  declare -A PANE_SESSION=()
+  declare -A SESSION_ATTACHED=()
+  if command -v tmux &>/dev/null; then
+    while IFS=$'\t' read -r ppath sname sattached; do
+      [[ -n "$ppath" ]] && PANE_SESSION["$ppath"]="$sname"
+      SESSION_ATTACHED["$sname"]="$sattached"
+    done < <(tmux list-panes -a \
+      -F "#{pane_current_path}\t#{session_name}\t#{session_attached}" 2>/dev/null || true)
+  fi
+
+  # Merged branch set
+  declare -A IS_MERGED=()
+  while IFS= read -r b; do
+    b="${b#  }"; b="${b# }"; b="${b#\* }"
+    [[ -n "$b" ]] && IS_MERGED["$b"]=1
+  done < <(git -C "$REPO_ROOT" branch --merged "$BASE_BRANCH" --list 'autoresearch/*' 2>/dev/null)
+
+  echo ""
+  echo -e "  ${BOLD}Research sessions${NC}  ${DIM}repo: ${REPO_NAME}  base: ${BASE_BRANCH}${NC}"
+  echo ""
+
+  for i in "${!AR_PATHS[@]}"; do
+    local wt="${AR_PATHS[$i]}"
+    local branch="${AR_BRANCHES[$i]}"
+    local short="${branch#autoresearch/}"
+
+    # Merged badge
+    local merged_badge=""
+    [[ -n "${IS_MERGED[$branch]+_}" ]] && merged_badge=" ${GREEN}[merged]${NC}"
+
+    # Age
+    local age
+    age=$(git -C "$wt" log -1 --format="%ar" 2>/dev/null || echo "unknown")
+
+    # Tmux session
+    local sess="${PANE_SESSION[$wt]:-}"
+    local tmux_label
+    if [[ -n "$sess" ]]; then
+      if [[ "${SESSION_ATTACHED[$sess]:-0}" == "1" ]]; then
+        tmux_label="${GREEN}● ${sess} (attached)${NC}"
+      else
+        tmux_label="${YELLOW}● ${sess} (detached)${NC}"
+      fi
+    else
+      tmux_label="${DIM}— no session${NC}"
+    fi
+
+    # Experiment stats
+    local stats
+    stats=$(experiment_stats "$wt")
+
+    echo -e "  ${ORANGE}${BOLD}${short}${NC}${merged_badge}"
+    echo -e "    ${DIM}age:     ${age}${NC}"
+    echo -e "    tmux:    ${tmux_label}"
+    echo -e "    ${DIM}results: ${stats}${NC}"
+    echo ""
+  done
+}
+
+# ---------------------------------------------------------------------------
+# Attach command
+# ---------------------------------------------------------------------------
+
+cmd_attach() {
+  local slug="${1:-}"
+  resolve_repo
+
+  command -v tmux &>/dev/null || fail "tmux not found. Install with: brew install tmux"
+
+  declare -a AR_PATHS=() AR_BRANCHES=()
+  collect_ar_worktrees
+
+  # Match each tmux pane's CWD against known worktree paths
+  declare -a SESS_NAMES=() SESS_BRANCHES=() SESS_PATHS=()
+  while IFS=$'\t' read -r ppath sname; do
+    for i in "${!AR_PATHS[@]}"; do
+      [[ "$ppath" == "${AR_PATHS[$i]}"* ]] || continue
+      local dup=0
+      for s in "${SESS_NAMES[@]+"${SESS_NAMES[@]}"}"; do
+        [[ "$s" == "$sname" ]] && { dup=1; break; }
+      done
+      if [[ $dup -eq 0 ]]; then
+        SESS_NAMES+=("$sname")
+        SESS_BRANCHES+=("${AR_BRANCHES[$i]}")
+        SESS_PATHS+=("${AR_PATHS[$i]}")
+      fi
+      break
+    done
+  done < <(tmux list-panes -a -F "#{pane_current_path}\t#{session_name}" 2>/dev/null || true)
+
+  if [[ ${#SESS_NAMES[@]} -eq 0 ]]; then
+    echo ""
+    echo -e "  ${DIM}No active research tmux sessions found.${NC}"
+    echo -e "  ${DIM}Run pi-research status to see all worktrees.${NC}"
+    echo ""
+    exit 0
+  fi
+
+  _do_attach() {
+    local target="$1"
+    if [[ -n "${TMUX:-}" ]]; then
+      tmux switch-client -t "$target"
+    else
+      tmux attach-session -t "$target"
+    fi
+  }
+
+  # Slug provided: match and attach directly
+  if [[ -n "$slug" ]]; then
+    for i in "${!SESS_NAMES[@]}"; do
+      if [[ "${SESS_NAMES[$i]}" == *"$slug"* || "${SESS_BRANCHES[$i]}" == *"$slug"* ]]; then
+        echo -e "  ${ORANGE}${BOLD}attaching to ${SESS_NAMES[$i]}…${NC}"
+        _do_attach "${SESS_NAMES[$i]}"
+        exit 0
+      fi
+    done
+    fail "No research session matching '${slug}'"
+  fi
+
+  # One session: attach without prompt
+  if [[ ${#SESS_NAMES[@]} -eq 1 ]]; then
+    echo ""
+    echo -e "  ${ORANGE}${BOLD}attaching to ${SESS_NAMES[0]}…${NC}"
+    echo ""
+    _do_attach "${SESS_NAMES[0]}"
+    exit 0
+  fi
+
+  # Multiple sessions: numbered picker
+  echo ""
+  echo -e "  ${BOLD}Research sessions:${NC}"
+  echo ""
+  for i in "${!SESS_NAMES[@]}"; do
+    local short="${SESS_BRANCHES[$i]#autoresearch/}"
+    echo -e "  ${GREEN}[$((i+1))]${NC}  ${short}"
+    echo -e "        ${DIM}${SESS_NAMES[$i]}${NC}"
+    echo ""
+  done
+  read -r -p "  Pick a session [1-${#SESS_NAMES[@]}]: " choice
+  local idx=$(( choice - 1 ))
+  if [[ $idx -ge 0 && $idx -lt ${#SESS_NAMES[@]} ]]; then
+    _do_attach "${SESS_NAMES[$idx]}"
+  else
+    fail "Invalid choice: $choice"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Usage
 # ---------------------------------------------------------------------------
 
@@ -104,6 +295,8 @@ usage() {
   echo -e "${BOLD}Commands:${NC}"
   echo -e "  ${GREEN}<goal>${NC}               Create a worktree and launch pi"
   echo -e "  ${GREEN}-s N <goal>${NC}          Create N worktrees in tmux splits"
+  echo -e "  ${GREEN}status${NC}               Dashboard of all active research sessions"
+  echo -e "  ${GREEN}attach [slug]${NC}        Re-attach to a running tmux session"
   echo -e "  ${GREEN}cleanup${NC}              Interactive cleanup of merged autoresearch worktrees"
   echo -e "  ${GREEN}cleanup --all${NC}        Remove all merged worktrees without prompt"
   echo -e "  ${GREEN}cleanup <slug>${NC}       Remove a specific worktree by name match"
@@ -176,31 +369,10 @@ cmd_cleanup() {
   resolve_repo
 
   # ── Collect all autoresearch/* worktrees ──────────────────────────────────
-  declare -a WT_PATHS=()
-  declare -a WT_BRANCHES=()
-
-  local cur_path="" cur_branch=""
-  while IFS= read -r line; do
-    case "$line" in
-      "worktree "*)
-        # Save previous entry if it was autoresearch
-        if [[ -n "$cur_path" && "$cur_branch" == refs/heads/autoresearch/* ]]; then
-          WT_PATHS+=("$cur_path")
-          WT_BRANCHES+=("${cur_branch#refs/heads/}")
-        fi
-        cur_path="${line#worktree }"
-        cur_branch=""
-        ;;
-      "branch "*)
-        cur_branch="${line#branch }"
-        ;;
-    esac
-  done < <(git -C "$REPO_ROOT" worktree list --porcelain)
-  # Flush last entry
-  if [[ -n "$cur_path" && "$cur_branch" == refs/heads/autoresearch/* ]]; then
-    WT_PATHS+=("$cur_path")
-    WT_BRANCHES+=("${cur_branch#refs/heads/}")
-  fi
+  declare -a AR_PATHS=() AR_BRANCHES=()
+  collect_ar_worktrees
+  declare -a WT_PATHS=("${AR_PATHS[@]+"${AR_PATHS[@]}"}")
+  declare -a WT_BRANCHES=("${AR_BRANCHES[@]+"${AR_BRANCHES[@]}"}")
 
   # ── Orphaned branches (autoresearch/* with no linked worktree) ────────────
   declare -a ORPHAN_BRANCHES=()
@@ -344,6 +516,18 @@ cmd_cleanup() {
 # ---------------------------------------------------------------------------
 # Parse args — route to cleanup or worktree creation
 # ---------------------------------------------------------------------------
+
+if [[ "${1:-}" == "status" ]]; then
+  resolve_repo
+  cmd_status
+  exit 0
+fi
+
+if [[ "${1:-}" == "attach" ]]; then
+  shift
+  cmd_attach "${1:-}"
+  exit 0
+fi
 
 if [[ "${1:-}" == "cleanup" ]]; then
   shift
