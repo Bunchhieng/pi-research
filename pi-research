@@ -29,10 +29,6 @@ info()  { echo -e "${GREEN}$1${NC}"; }
 warn()  { echo -e "${YELLOW}⚠ $1${NC}"; }
 fail()  { echo -e "${RED}ERROR: $1${NC}" >&2; exit 1; }
 
-is_ghostty() {
-  [[ "${TERM_PROGRAM:-}" == "ghostty" ]] || [[ -n "${GHOSTTY_RESOURCES_DIR:-}" ]]
-}
-
 is_iterm() {
   [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]]
 }
@@ -124,28 +120,6 @@ _show_split_header() {
   echo ""
 }
 
-# Ghostty: can't inject a command into splits, so use a launch queue.
-# Each new pane shell reads ~/.pi-research-queue on startup via the zshrc hook.
-launch_ghostty_splits() {
-  local queue="$HOME/.pi-research-queue"
-  : > "$queue"
-  for i in $(seq 1 $((SPLITS - 1))); do
-    printf 'cd %q && exec pi\n' "${WORKTREES[$i]}" >> "$queue"
-  done
-
-  _show_split_header "Ghostty"
-  echo -e "  ${DIM}each new pane auto-launches pi via ~/.pi-research-queue${NC}"
-  echo ""
-
-  for _ in $(seq 1 $((SPLITS - 1))); do
-    ghostty +send-action new_split:right 2>/dev/null || true
-    sleep 0.25
-  done
-
-  cd "${WORKTREES[0]}"
-  exec pi
-}
-
 # iTerm2: AppleScript can open a split and run a command directly.
 launch_iterm_splits() {
   _show_split_header "iTerm2"
@@ -202,7 +176,7 @@ usage() {
   echo -e "  ${GREEN}help${NC}                 Show this help message"
   echo ""
   echo -e "${BOLD}Supported terminals for -s N splits:${NC}"
-  echo -e "  ${DIM}Ghostty, iTerm2, WezTerm, Kitty  (tmux fallback for all others)${NC}"
+  echo -e "  ${DIM}iTerm2, WezTerm, Kitty  (tmux fallback for Ghostty and all others)${NC}"
   echo ""
   echo -e "${BOLD}Examples:${NC}"
   echo -e "  ${DIM}pi-research${NC}"

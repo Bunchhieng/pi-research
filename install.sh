@@ -8,7 +8,6 @@ set -euo pipefail
 #   1. pi install davebcn87/pi-autoresearch  (core extension)
 #   2. pi install Bunchhieng/pi-research     (this package)
 #   3. Adds pi-research alias to your shell rc file
-#   4. Adds Ghostty launch-queue hook to your shell rc file
 
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -81,30 +80,6 @@ else
   } >> "$RC_FILE"
   ok "added to ${RC_FILE}"
   echo -e "  ${DIM}${ALIAS_LINE}${NC}"
-fi
-
-# ---------------------------------------------------------------------------
-# Step 4 — add Ghostty launch-queue hook to shell rc
-# ---------------------------------------------------------------------------
-
-step "Adding Ghostty launch-queue hook to shell"
-
-QUEUE_HOOK='
-# pi-research — Ghostty split launch queue
-_pi_research_dequeue() {
-  local _q="$HOME/.pi-research-queue"
-  [[ -s "$_q" ]] || return
-  local _cmd
-  _cmd=$(head -1 "$_q") && { tail -n +2 "$_q" > "$_q.tmp" && mv "$_q.tmp" "$_q"; } 2>/dev/null
-  [[ -n "$_cmd" ]] && eval "$_cmd"
-}
-_pi_research_dequeue'
-
-if grep -q "_pi_research_dequeue" "$RC_FILE" 2>/dev/null; then
-  skip "queue hook already in ${RC_FILE} — skipping"
-else
-  printf '%s\n' "$QUEUE_HOOK" >> "$RC_FILE"
-  ok "queue hook added to ${RC_FILE}"
 fi
 
 # ---------------------------------------------------------------------------
