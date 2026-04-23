@@ -187,21 +187,28 @@ launch_kitty_splits() {
 # ---------------------------------------------------------------------------
 
 usage() {
-  echo "Usage: pi-research [command] [options]"
   echo ""
-  echo "  <goal>              Create a worktree and launch pi"
-  echo "  -s N <goal>         Create N worktrees in tmux splits"
-  echo "  cleanup             Interactive cleanup of autoresearch worktrees"
-  echo "  cleanup --all       Remove all merged worktrees without prompt"
-  echo "  cleanup <slug>      Remove a specific worktree by name match"
+  echo -e "${ORANGE}${BOLD}Usage:${NC} pi-research ${DIM}[command] [options]${NC}"
   echo ""
-  echo "Examples:"
-  echo "  pi-research"
-  echo "  pi-research optimize-tests"
-  echo "  pi-research -s 3 optimize-bundle"
-  echo "  pi-research cleanup"
-  echo "  pi-research cleanup --all"
-  echo "  pi-research cleanup optimize-tests"
+  echo -e "${BOLD}Commands:${NC}"
+  echo -e "  ${GREEN}<goal>${NC}               Create a worktree and launch pi"
+  echo -e "  ${GREEN}-s N <goal>${NC}          Create N worktrees in native splits (or tmux fallback)"
+  echo -e "  ${GREEN}cleanup${NC}              Interactive cleanup of merged autoresearch worktrees"
+  echo -e "  ${GREEN}cleanup --all${NC}        Remove all merged worktrees without prompt"
+  echo -e "  ${GREEN}cleanup <slug>${NC}       Remove a specific worktree by name match"
+  echo -e "  ${GREEN}help${NC}                 Show this help message"
+  echo ""
+  echo -e "${BOLD}Supported terminals for -s N splits:${NC}"
+  echo -e "  ${DIM}Ghostty, iTerm2, WezTerm, Kitty  (tmux fallback for all others)${NC}"
+  echo ""
+  echo -e "${BOLD}Examples:${NC}"
+  echo -e "  ${DIM}pi-research${NC}"
+  echo -e "  ${DIM}pi-research optimize-tests${NC}"
+  echo -e "  ${DIM}pi-research -s 3 optimize-bundle${NC}"
+  echo -e "  ${DIM}pi-research cleanup${NC}"
+  echo -e "  ${DIM}pi-research cleanup --all${NC}"
+  echo -e "  ${DIM}pi-research cleanup optimize-tests${NC}"
+  echo ""
   exit 0
 }
 
@@ -437,6 +444,10 @@ if [[ "${1:-}" == "cleanup" ]]; then
   exit 0
 fi
 
+if [[ "${1:-}" == "help" ]]; then
+  usage
+fi
+
 SPLITS=1
 GOAL=""
 
@@ -447,7 +458,7 @@ while [[ $# -gt 0 ]]; do
       SPLITS="$2"
       shift 2
       ;;
-    -h|--help) usage ;;
+    -h|--help|-help) usage ;;
     -*) fail "Unknown flag: $1" ;;
     *)
       GOAL="$1"
