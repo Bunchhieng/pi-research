@@ -605,9 +605,10 @@ for i in $(seq 1 "$SPLITS"); do
     WORKTREE_DIR="${REPO_ROOT}/../${REPO_NAME}-research-${GOAL_SLUG}-${TIMESTAMP}-${i}"
   fi
   WORKTREES+=("$WORKTREE_DIR"); BRANCHES+=("$BRANCH")
-  WT_LOGS+=("$(mktemp)")
+  _log="$(mktemp)"
+  WT_LOGS+=("$_log")
   git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" "$BASE_BRANCH" \
-    >"${WT_LOGS[-1]}" 2>&1 &
+    >"$_log" 2>&1 &
   WT_PIDS+=($!)
 done
 
